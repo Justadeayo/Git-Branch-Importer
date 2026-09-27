@@ -1,30 +1,25 @@
-name: Cherry-Pick Multiple Commits
+name: Revert Multiple Commits
 
 on:
   workflow_dispatch:
     inputs:
-      source_repo_url:
-        description: "Source Repository URL"
-        required: true
-        type: string
-
       commit_shas:
-        description: "Space or newline-separated Commit SHAs"
+        description: "Space or newline-separated Commit SHAs to revert (e.g., sha1 sha2 sha3)"
         required: true
         type: string
 
       target_repo_url:
-        description: "Target Repository URL"
+        description: "Target Repository URL (e.g., https://github.com/Justadeayo/target-repo.git)"
         required: true
         type: string
 
       target_branch:
-        description: "Target Branch Name"
+        description: "Target Branch Name to revert commits on"
         required: true
         type: string
 
 jobs:
-  cherry-pick:
+  revert-commits:
     runs-on: ubuntu-latest
     steps:
       - name: Set up SSH Key for Signing
@@ -44,7 +39,7 @@ jobs:
           git config --global user.signingkey "$HOME/.ssh/signing_key"
           git config --global commit.gpgsign true
 
-      - name: Fetch and Cherry-Pick Commits
+      - name: Fetch and Revert Commits
         env:
           TARGET_PAT: ${{ secrets.GLOBAL_REPO_PAT }}
           GIT_COMMITTER_NAME: "Justus"
@@ -53,40 +48,34 @@ jobs:
         run: |
           mkdir commit-sync && cd commit-sync
           git init
-
+          
           TARGET_URL="${{ inputs.target_repo_url }}"
           AUTH_TARGET_URL=$(echo "$TARGET_URL" | sed -E "s|https://|https://x-access-token:${TARGET_PAT}@|")
-
+          
+          echo "Fetching target branch '${{ inputs.target_branch }}'..."
           git remote add target "$AUTH_TARGET_URL"
           git fetch target "${{ inputs.target_branch }}"
           git checkout -b "${{ inputs.target_branch }}" FETCH_HEAD
 
-          git remote add source "${{ inputs.source_repo_url }}"
-          git fetch source --no-tags
-
           for sha in $COMMIT_LIST; do
-            if git cherry-pick -s -X theirs "$sha"; then
-              echo "Successfully cherry-picked $sha"
+            echo "----------------------------------------------------"
+            echo "Reverting commit: $sha"
+            if git revert -s --no-edit "$sha"; then
+              echo "Successfully reverted $sha"
             else
-              git cherry-pick --abort || true
-
-              git fetch source "$sha"
-              git format-patch -1 FETCH_HEAD --stdout > patch.diff
-
-              if git apply --3way patch.diff; then
-                git add .
-                git commit -s -C FETCH_HEAD
+              echo "Revert conflict encountered for $sha. Attempting fallback resolution..."
+             
+              git checkout --theirs .
+              git add .
+              if git revert -s --continue --no-edit; then
+                echo "Resolved conflicts and reverted $sha"
               else
-                git apply --reject --whitespace=fix patch.diff || true
-                find . -name "*.rej" -type f -delete
-                
-                git add .
-                if ! git diff --cached --quiet; then
-                  git commit -s -C FETCH_HEAD
-                fi
+                echo "::warning::Skipping unresolvable revert for commit $sha"
+                git revert --abort || true
               fi
-              rm -f patch.diff
             fi
           done
 
+          echo "Pushing changes back to target repository..."
           git push target "${{ inputs.target_branch }}"
+          
