@@ -42,23 +42,18 @@ jobs:
         env:
           TARGET_PAT: ${{ secrets.GLOBAL_REPO_PAT }}
         run: |
-          # 1. Initialize an empty local Git directory
           mkdir repo-sync && cd repo-sync
           git init
 
-          # 2. Add and fetch the branch from the Source repo
           echo "Fetching '${{ inputs.source_branch }}' from source..."
           git remote add source "${{ inputs.source_repo_url }}"
           git fetch source "${{ inputs.source_branch }}"
 
-          # 3. Create tracking branch locally
           git checkout -b "${{ inputs.target_branch }}" FETCH_HEAD
 
-          # 4. Inject PAT into Target Repository URL for authentication
           TARGET_URL="${{ inputs.target_repo_url }}"
           AUTH_TARGET_URL=$(echo "$TARGET_URL" | sed -E "s|https://|https://x-access-token:${TARGET_PAT}@|")
 
-          # 5. Push branch to Target
           git remote add target "$AUTH_TARGET_URL"
           
           FLAGS=""
@@ -69,7 +64,6 @@ jobs:
           echo "Pushing branch '${{ inputs.target_branch }}' to target repository..."
           git push $FLAGS target "${{ inputs.target_branch }}"
 
-          # 6. Verify operation
           if [ $? -eq 0 ]; then
             echo "Successfully imported branch '${{ inputs.source_branch }}' into '${{ inputs.target_repo_url }}' as '${{ inputs.target_branch }}'."
           else

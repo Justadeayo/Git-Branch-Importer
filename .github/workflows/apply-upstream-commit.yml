@@ -38,26 +38,21 @@ jobs:
           GIT_COMMITTER_NAME: "Justus"
           GIT_COMMITTER_EMAIL: "Justadeayo@users.noreply.github.com"
         run: |
-          # 1. Initialize isolated Git workspace
           mkdir commit-sync && cd commit-sync
           git init
 
-          # 2. Authenticate Target Repo
           TARGET_URL="${{ inputs.target_repo_url }}"
           AUTH_TARGET_URL=$(echo "$TARGET_URL" | sed -E "s|https://|https://x-access-token:${TARGET_PAT}@|")
 
-          # 3. Fetch Target Branch
           echo "Fetching target branch '${{ inputs.target_branch }}'..."
           git remote add target "$AUTH_TARGET_URL"
           git fetch target "${{ inputs.target_branch }}"
           git checkout -b "${{ inputs.target_branch }}" FETCH_HEAD
 
-          # 4. Fetch the specific commit from Source Repo
           echo "Fetching commit ${{ inputs.commit_sha }} from source..."
           git remote add source "${{ inputs.source_repo_url }}"
           git fetch source "${{ inputs.commit_sha }}"
 
-          # 5. Cherry-pick the fetched commit
           echo "Applying commit via cherry-pick as Justus..."
           if git cherry-pick FETCH_HEAD; then
             echo "Commit applied cleanly."
@@ -66,7 +61,6 @@ jobs:
             exit 1
           fi
 
-          # 6. Push back to Target Repo
           echo "Pushing changes back to target repository..."
           git push target "${{ inputs.target_branch }}"
           
