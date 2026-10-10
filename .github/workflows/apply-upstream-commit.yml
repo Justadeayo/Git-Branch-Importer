@@ -26,35 +26,116 @@ on:
 jobs:
   apply-commit:
     runs-on: ubuntu-latest
+    outputs:
+      src_hash: ${{ steps.key.outputs.src }}
+      tgt_hash: ${{ steps.key.outputs.tgt }}
     steps:
       - name: Configure Git User
         run: |
           git config --global user.name "Justus"
           git config --global user.email "Justadeayo@users.noreply.github.com"
 
-      - name: Fetch and Cherry-Pick Commit
+      - name: Compute Cache Keys
+        id: key
+        env:
+          SRC: ${{ inputs.source_repo_url }}
+          TGT: ${{ inputs.target_repo_url }}
+        run: |
+          hash() { printf '%s' "$1" | tr 'A-Z' 'a-z' | sed -E 's#(\.git)?/*$##' | sha256sum | cut -c1-16; }
+          echo "src=$(hash "$SRC")" >> $GITHUB_OUTPUT
+          echo "tgt=$(hash "$TGT")" >> $GITHUB_OUTPUT
+
+      - name: Restore Source Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: cache/src.git
+          key: repo-${{ steps.key.outputs.src }}-none
+          restore-keys: repo-${{ steps.key.outputs.src }}-
+
+      - name: Restore Target Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: cache/tgt.git
+          key: repo-${{ steps.key.outputs.tgt }}-none
+          restore-keys: repo-${{ steps.key.outputs.tgt }}-
+
+      - name: Sync Repo Caches
+        id: sync
+        env:
+          GIT_TERMINAL_PROMPT: 0
+          TARGET_PAT: ${{ secrets.GLOBAL_REPO_PAT }}
+          SRC: ${{ inputs.source_repo_url }}
+          TGT: ${{ inputs.target_repo_url }}
+          BR: ${{ inputs.target_branch }}
+          SHA: ${{ inputs.commit_sha }}
+        run: |
+          init_repo() { [ -d "$1" ] || git init -q --bare "$1"; }
+          sync_branch() {
+            init_repo "$1"
+            remote=$(git ls-remote "$2" "refs/heads/$3" | awk -v r="refs/heads/$3" '$2==r{print $1}')
+            if [ -z "$remote" ]; then
+              echo "::error::Branch '$3' not found in remote"
+              exit 1
+            fi
+            have=$(git --git-dir="$1" rev-parse -q --verify "refs/heads/$3" || true)
+            if [ "$remote" = "$have" ]; then
+              echo "Cache up to date for '$3' at $remote"
+              return 0
+            fi
+            git --git-dir="$1" fetch -q --no-tags --no-write-fetch-head "$2" "+refs/heads/$3:refs/heads/$3"
+            echo "$4=true" >> $GITHUB_OUTPUT
+          }
+          sync_sha() {
+            init_repo "$1"
+            if git --git-dir="$1" cat-file -e "$3^{commit}" 2>/dev/null; then
+              echo "Commit $3 already cached"
+              return 0
+            fi
+            git --git-dir="$1" fetch -q --no-tags --no-write-fetch-head "$2" "+$3:refs/cache/$3"
+            echo "$4=true" >> $GITHUB_OUTPUT
+          }
+
+          AUTH_TGT=$(echo "$TGT" | sed -E "s|https://|https://x-access-token:${TARGET_PAT}@|")
+          mkdir -p cache
+          sync_sha cache/src.git "$SRC" "$SHA" src_changed
+          sync_branch cache/tgt.git "$AUTH_TGT" "$BR" tgt_changed
+          if grep -qs "x-access-token" cache/*.git/config cache/*.git/FETCH_HEAD; then
+            echo "::error::Credentials found in repo cache"
+            exit 1
+          fi
+
+      - name: Save Source Cache
+        if: steps.sync.outputs.src_changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: cache/src.git
+          key: repo-${{ steps.key.outputs.src }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save Target Cache
+        if: steps.sync.outputs.tgt_changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: cache/tgt.git
+          key: repo-${{ steps.key.outputs.tgt }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Cherry-Pick and Push
         env:
           TARGET_PAT: ${{ secrets.GLOBAL_REPO_PAT }}
           GIT_COMMITTER_NAME: "Justus"
           GIT_COMMITTER_EMAIL: "Justadeayo@users.noreply.github.com"
+          TGT: ${{ inputs.target_repo_url }}
+          BR: ${{ inputs.target_branch }}
+          SHA: ${{ inputs.commit_sha }}
         run: |
-          mkdir commit-sync && cd commit-sync
-          git init
-
-          TARGET_URL="${{ inputs.target_repo_url }}"
-          AUTH_TARGET_URL=$(echo "$TARGET_URL" | sed -E "s|https://|https://x-access-token:${TARGET_PAT}@|")
-
-          echo "Fetching target branch '${{ inputs.target_branch }}'..."
-          git remote add target "$AUTH_TARGET_URL"
-          git fetch target "${{ inputs.target_branch }}"
-          git checkout -b "${{ inputs.target_branch }}" FETCH_HEAD
-
-          echo "Fetching commit ${{ inputs.commit_sha }} from source..."
-          git remote add source "${{ inputs.source_repo_url }}"
-          git fetch source "${{ inputs.commit_sha }}"
+          WS="$GITHUB_WORKSPACE"
+          AUTH_TGT=$(echo "$TGT" | sed -E "s|https://|https://x-access-token:${TARGET_PAT}@|")
+          mkdir -p work && cd work
+          git init -q
+          printf '%s\n%s\n' "$WS/cache/src.git/objects" "$WS/cache/tgt.git/objects" > .git/objects/info/alternates
+          git checkout -q -B "$BR" "$(git --git-dir="$WS/cache/tgt.git" rev-parse "refs/heads/$BR")"
 
           echo "Applying commit via cherry-pick as Justus..."
-          if git cherry-pick FETCH_HEAD; then
+          if git cherry-pick "$SHA"; then
             echo "Commit applied cleanly."
           else
             echo "::error::Cherry-pick failed due to merge conflicts."
@@ -62,5 +143,23 @@ jobs:
           fi
 
           echo "Pushing changes back to target repository..."
-          git push target "${{ inputs.target_branch }}"
-          
+          git push "$AUTH_TGT" "$BR"
+
+  Cache_Cleanup:
+    needs: apply-commit
+    if: ${{ needs.apply-commit.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CACHE_LIMIT_GB: 8
+      HASHES: ${{ needs.apply-commit.outputs.src_hash }} ${{ needs.apply-commit.outputs.tgt_hash }}
+    steps:
+      - name: Prune old repo caches
+        run: |
+          for h in $HASHES; do
+            gh cache list --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" --key "repo-${h}-" --sort created_at --order desc --limit 100 --json id | jq -r '.[1:][].id' | xargs -r -I{} gh cache delete {} --repo "$GITHUB_REPOSITORY" || true
+          done
+          LIMIT=$((CACHE_LIMIT_GB * 1024 * 1024 * 1024))
+          gh cache list --repo "$GITHUB_REPOSITORY" --key "repo-" --sort last_accessed_at --order desc --limit 100 --json id,sizeInBytes | jq -r --argjson l "$LIMIT" 'foreach .[] as $c (0; . + $c.sizeInBytes; {id: $c.id, total: .}) | select(.total > $l) | .id' | xargs -r -I{} gh cache delete {} --repo "$GITHUB_REPOSITORY" || true

@@ -32,41 +32,106 @@ on:
 jobs:
   import-branch:
     runs-on: ubuntu-latest
+    outputs:
+      src_hash: ${{ steps.key.outputs.src }}
     steps:
       - name: Configure Git User
         run: |
           git config --global user.name "Justus"
           git config --global user.email "Justadeayo@users.noreply.github.com"
 
-      - name: Fetch from Source and Push to Target
+      - name: Compute Cache Keys
+        id: key
+        env:
+          SRC: ${{ inputs.source_repo_url }}
+        run: |
+          hash() { printf '%s' "$1" | tr 'A-Z' 'a-z' | sed -E 's#(\.git)?/*$##' | sha256sum | cut -c1-16; }
+          echo "src=$(hash "$SRC")" >> $GITHUB_OUTPUT
+
+      - name: Restore Source Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: cache/src.git
+          key: repo-${{ steps.key.outputs.src }}-none
+          restore-keys: repo-${{ steps.key.outputs.src }}-
+
+      - name: Sync Repo Caches
+        id: sync
+        env:
+          GIT_TERMINAL_PROMPT: 0
+          SRC: ${{ inputs.source_repo_url }}
+          SBR: ${{ inputs.source_branch }}
+        run: |
+          init_repo() { [ -d "$1" ] || git init -q --bare "$1"; }
+          sync_branch() {
+            init_repo "$1"
+            remote=$(git ls-remote "$2" "refs/heads/$3" | awk -v r="refs/heads/$3" '$2==r{print $1}')
+            if [ -z "$remote" ]; then
+              echo "::error::Branch '$3' not found in remote"
+              exit 1
+            fi
+            have=$(git --git-dir="$1" rev-parse -q --verify "refs/heads/$3" || true)
+            if [ "$remote" = "$have" ]; then
+              echo "Cache up to date for '$3' at $remote"
+              return 0
+            fi
+            git --git-dir="$1" fetch -q --no-tags --no-write-fetch-head "$2" "+refs/heads/$3:refs/heads/$3"
+            echo "$4=true" >> $GITHUB_OUTPUT
+          }
+
+          mkdir -p cache
+          sync_branch cache/src.git "$SRC" "$SBR" src_changed
+          if grep -qs "x-access-token" cache/*.git/config cache/*.git/FETCH_HEAD; then
+            echo "::error::Credentials found in repo cache"
+            exit 1
+          fi
+
+      - name: Save Source Cache
+        if: steps.sync.outputs.src_changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: cache/src.git
+          key: repo-${{ steps.key.outputs.src }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Push to Target
         env:
           TARGET_PAT: ${{ secrets.GLOBAL_REPO_PAT }}
+          TGT: ${{ inputs.target_repo_url }}
+          SBR: ${{ inputs.source_branch }}
+          TBR: ${{ inputs.target_branch }}
+          FORCE: ${{ inputs.force_push }}
         run: |
-          mkdir repo-sync && cd repo-sync
-          git init
+          WS="$GITHUB_WORKSPACE"
+          AUTH_TGT=$(echo "$TGT" | sed -E "s|https://|https://x-access-token:${TARGET_PAT}@|")
+          mkdir -p work && cd work
+          git init -q
+          printf '%s\n' "$WS/cache/src.git/objects" > .git/objects/info/alternates
+          git checkout -q -B "$TBR" "$(git --git-dir="$WS/cache/src.git" rev-parse "refs/heads/$SBR")"
 
-          echo "Fetching '${{ inputs.source_branch }}' from source..."
-          git remote add source "${{ inputs.source_repo_url }}"
-          git fetch source "${{ inputs.source_branch }}"
-
-          git checkout -b "${{ inputs.target_branch }}" FETCH_HEAD
-
-          TARGET_URL="${{ inputs.target_repo_url }}"
-          AUTH_TARGET_URL=$(echo "$TARGET_URL" | sed -E "s|https://|https://x-access-token:${TARGET_PAT}@|")
-
-          git remote add target "$AUTH_TARGET_URL"
-          
           FLAGS=""
-          if [ "${{ inputs.force_push }}" = "true" ]; then
+          if [ "$FORCE" = "true" ]; then
             FLAGS="--force"
           fi
 
-          echo "Pushing branch '${{ inputs.target_branch }}' to target repository..."
-          git push $FLAGS target "${{ inputs.target_branch }}"
+          echo "Pushing branch '$TBR' to target repository..."
+          git push $FLAGS "$AUTH_TGT" "$TBR"
+          echo "Successfully imported branch '$SBR' into '$TGT' as '$TBR'."
 
-          if [ $? -eq 0 ]; then
-            echo "Successfully imported branch '${{ inputs.source_branch }}' into '${{ inputs.target_repo_url }}' as '${{ inputs.target_branch }}'."
-          else
-            echo "Failed to push to target repository."
-            exit 1
-          fi
+  Cache_Cleanup:
+    needs: import-branch
+    if: ${{ needs.import-branch.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CACHE_LIMIT_GB: 8
+      HASHES: ${{ needs.import-branch.outputs.src_hash }}
+    steps:
+      - name: Prune old repo caches
+        run: |
+          for h in $HASHES; do
+            gh cache list --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" --key "repo-${h}-" --sort created_at --order desc --limit 100 --json id | jq -r '.[1:][].id' | xargs -r -I{} gh cache delete {} --repo "$GITHUB_REPOSITORY" || true
+          done
+          LIMIT=$((CACHE_LIMIT_GB * 1024 * 1024 * 1024))
+          gh cache list --repo "$GITHUB_REPOSITORY" --key "repo-" --sort last_accessed_at --order desc --limit 100 --json id,sizeInBytes | jq -r --argjson l "$LIMIT" 'foreach .[] as $c (0; . + $c.sizeInBytes; {id: $c.id, total: .}) | select(.total > $l) | .id' | xargs -r -I{} gh cache delete {} --repo "$GITHUB_REPOSITORY" || true
