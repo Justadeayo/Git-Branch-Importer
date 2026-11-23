@@ -120,6 +120,20 @@ To ensure cherry-picked commits are properly signed and linked to your GitHub co
 | **Target Branch Name** | Branch to revert the commits on | `main` |
 
 ---
+### 5. Drop Commits (Rewrite History)
+*Removes a list of commits from a target branch's history with an interactive rebase, then force-pushes the rewritten branch.*
+1. Go to the **Actions** tab > **Drop Commits (Rewrite History)**.
+2. Click **Run workflow** and provide the inputs:
+
+| Input Field | Description | Example |
+| :--- | :--- | :--- |
+| **Commit SHAs** | Space or newline-separated SHAs to drop from history | `a1b2c3d e4f5a6b` |
+| **Target Repository URL** | HTTPS URL of your target repository | `https://github.com/your-username/target-repo.git` |
+| **Target Branch Name** | Branch to rewrite | `main` |
+
+> **Warning:** This rewrites the branch and force-pushes it. Anyone who has pulled the branch will need to reset to the new history. Commits that conflict during the rewrite are resolved in favour of the replayed commits (`-X theirs`), the same as cherry-pick.
+
+---
 ## ⚡ Caching
 Each repository a workflow reads from (source and target) is kept as a bare git cache using `actions/cache`, so a repeat run does not clone it again.
 * **Key:** a hash of the repository URL (case, trailing `/` and `.git` ignored). One cache per repository, shared by every workflow that uses it.
@@ -135,11 +149,12 @@ Each repository a workflow reads from (source and target) is kept as a bare git 
 
 | Version | Date | Notes | Branch |
 | :--- | :--- | :--- | :--- |
+| **1.2** | 2026-11-23 | Added `drop-commits.yml` (rewrite history by dropping listed commits and force-pushing) | `main` |
 | **1.1** | 2026-10-10 | Per-repository clone cache for all workflows (skip when unchanged, incremental fetch, size-based cleanup); documented `cherrypick.yml`, `revert.yml` and the `SSH_PRIVATE_KEY` secret | `main` |
 | **1.0** | 2026-09-07 | Initial release with `import-branch` and `apply-upstream-commit` workflows | `main` |
 
 ---
-**Last Updated:** 2026-10-10  
+**Last Updated:** 2026-11-23  
 **Primary Branches:** main  
 **Status:** 🚀 Active Toolset
 ---
