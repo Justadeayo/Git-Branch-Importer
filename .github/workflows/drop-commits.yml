@@ -36,7 +36,7 @@ jobs:
           chmod 600 ~/.ssh/signing_key
 
           git config --global user.name "Justus"
-          git config --global user.email "Justadeayo@users.noreply.github.com"
+          git config --global user.email "184845233+Justadeayo@users.noreply.github.com"
           git config --global gpg.format ssh
           git config --global user.signingkey "$HOME/.ssh/signing_key"
           git config --global commit.gpgsign true
@@ -100,7 +100,7 @@ jobs:
         env:
           TARGET_PAT: ${{ secrets.GLOBAL_REPO_PAT }}
           GIT_COMMITTER_NAME: "Justus"
-          GIT_COMMITTER_EMAIL: "Justadeayo@users.noreply.github.com"
+          GIT_COMMITTER_EMAIL: "184845233+Justadeayo@users.noreply.github.com"
           TGT: ${{ inputs.target_repo_url }}
           BR: ${{ inputs.target_branch }}
           COMMIT_LIST: ${{ inputs.commit_shas }}
